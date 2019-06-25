@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 # https://www.mathworks.com/matlabcentral/fileexchange/56633-fast-bounded-power-diagram
 #
 class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
-    def __init__(self,S,wts,bound_vertexes=None):
+    def __init__(self,S,wts,bound_vertexes=None,bounded=True):
         '''
         This function computes the power cells using the points in S
         the bounding box (must be a rectangle) must be used by defining its vertexes.
@@ -30,30 +30,39 @@ class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
         The cell cropping process, however, is discarded,
         and the reflection method is used to solve the problem of having cells exceed boundaries.
         This little modification is done by LIANG Zhengyu (liangzhengyu@csu.edu.cn)
-        '''
+        ''' 
         S = np.asarray(S)
         wts = np.asarray(wts)
         # assure that S and wts have the right shapes
-        if S.shape[1] != 2 or len(S.shape) != 2:
+        if (len(S.shape) != 2):
+            raise ValueError('S must be a 2D matrix')
+        elif (S.shape[1] != 2):
             raise ValueError('S must be a N*2 matrix')
-        if wts.shape[1] != 1 or len(wts.shape) !=2 or wts.shape[0] != S.shape[0]:
+            
+        if (len(wts.shape) !=2):
+            raise ValueError('wts must be a 2D matrix')
+        elif (wts.shape[1] != 1) or (wts.shape[0] != S.shape[0]):
             raise ValueError('wts must be a N*1 vector that has the same row number as S')
         if bound_vertexes is None:
             # using the bounding box as the boundary (a smooth value is added to assure that every 
             # point has its own symmetric point, with respect to the boundary)
             bnd=[S[:,0].min()-1e-3,S[:,0].max()+1e-3,S[:,1].min()-1e-3,S[:,1].max()+1e-3]
             bound_vertexes = np.asarray([[bnd[0],bnd[3]],[bnd[1],bnd[3]],[bnd[1],bnd[2]],[bnd[0],bnd[2]]])
-        elif bound_vertexes.shape[1] != 2 or len(bound_vertexes.shape) != 2 or bound_vertexes.shape[0] !=4:
+        elif (bound_vertexes.shape[1] != 2) or (len(bound_vertexes.shape) != 2) or (bound_vertexes.shape[0] !=4):
             raise ValueError('if supplied, bound_vertexes must be a 4*2 vector')
+        # initiating attributes
+        self.bounded = bounded # see if bounded mode is used
+        self.V = None
+        self.CE = None
         self.S = S
         self.wts = wts
         self.bound_vertexes = bound_vertexes
-        del S,wts
+        del S,wts,bounded,bound_vertexes
         # exclude points outside the boundary
-        indomain = (self.S[:,0] >= bound_vertexes[:,0].min()) \
-         & (self.S[:,0] <= bound_vertexes[:,0].max()) \
-         & (self.S[:,1] >= bound_vertexes[:,1].min()) \
-         & (self.S[:,1] <= bound_vertexes[:,1].max())
+        indomain = (self.S[:,0] >= self.bound_vertexes[:,0].min()) \
+         & (self.S[:,0] <= self.bound_vertexes[:,0].max()) \
+         & (self.S[:,1] >= self.bound_vertexes[:,1].min()) \
+         & (self.S[:,1] <= self.bound_vertexes[:,1].max())
         if ~indomain.all():
             self.Sused = self.S[indomain,:]
             self.wtsused = self.wts[indomain,:]
@@ -65,7 +74,12 @@ class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
             self.wtsused = self.wts
         # compute initial LD
         tempVi,tempCe = self._powerDiagram2(self.Sused,self.wtsused,self.bound_vertexes)
-        V,CE = self._boundedLD(tempVi,tempCe,self.Sused,self.wtsused)
+        
+        if self.bounded:
+            V,CE = self._boundedLD(tempVi,tempCe,self.Sused,self.wtsused)
+        else:
+            V = tempVi
+            CE =tempCe
         V,CE = self._sortcells(V,CE)
         self.V = V
         self.CE = CE
@@ -150,14 +164,22 @@ class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
             # draw vertices
             plt.plot(self.V[singleCE,0], self.V[singleCE,1], 'r.')
         # draw boundary
-        plt.plot(self.bound_vertexes[:,0],self.bound_vertexes[:,1],'--b')
+        plt.plot(np.hstack((self.bound_vertexes[:,0],self.bound_vertexes[0,0,np.newaxis])) \
+                ,np.hstack((self.bound_vertexes[:,1],self.bound_vertexes[0,1,np.newaxis])), \
+                '--b')
         # draw sites
         plt.plot(self.S[:,0],self.S[:,1],'k.')
-
-
         plt.axis('equal')
         plt.show()
-
+    def countcells(self):
+        '''
+        Output effective cell num
+        '''
+        invalidnum = 0
+        for CEi in self.CE:
+            if (CEi == -1).any():
+                invalidnum += 1
+        return len(self.CE)-invalidnum
     def _cart2pol(self,xy):
         """
         mimic the matlab cart2pol function
@@ -176,7 +198,7 @@ class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
             if (CEi == -1).any():
                 continue
             pts = V[CEi,:]
-            t,r = self._cart2pol(pts-np.mean(pts,axis=0,keepdims=True))
+            t,_ = self._cart2pol(pts-np.mean(pts,axis=0,keepdims=True))
             order = np.argsort(t)
             CE[i] = CEi[order]
         return V,CE
@@ -224,3 +246,115 @@ class LaguerreDiagram(object): # power diagram also called laguerre diagram (LD)
         newV,newCE = self._powerDiagram2(newS,newWt,self.bound_vertexes)
         newCE = newCE[0:-symmetric_num]
         return newV, newCE
+
+    ## shape evaluation
+    def cell_aixs(self,downsampling = False,samplenum = 100):
+        '''
+        computing all cells' axis
+        '''
+        if not self.bounded:
+            minx = self.bound_vertexes[:,0].min()
+            maxx = self.bound_vertexes[:,0].max()
+            miny = self.bound_vertexes[:,1].min()
+            maxy = self.bound_vertexes[:,1].max()
+        if downsampling:
+            indexes = np.random.choice (len(self.CE),samplenum)
+        else:
+            indexes = range(0,len(self.CE))
+        Ls = -np.ones(len(indexes))
+        Ss = -np.ones(len(indexes))
+        LAs = -np.ones(len(indexes))
+        count = 0
+        for i in indexes:
+            cell = self.CE[i]
+            if (cell == -1).any():
+                count += 1
+                continue
+            poly = self.V[cell]
+            if not self.bounded:
+                if poly[:,0].max()>maxx or poly[:,0].min()<minx \
+                or poly[:,1].max()>maxy or poly[:,1].min()<miny:
+                    count += 1
+                    continue
+            L,S,LA = self._polyFeret_2D(poly)
+            Ls[count] = L
+            Ss[count] = S
+            LAs[count] = LA
+            count += 1
+        return Ls,Ss,LAs
+    
+    def cell_areas(self,downsampling = False,samplenum = 100):
+        '''
+        computing all cells' area
+        '''
+        if not self.bounded:
+            minx = self.bound_vertexes[:,0].min()
+            maxx = self.bound_vertexes[:,0].max()
+            miny = self.bound_vertexes[:,1].min()
+            maxy = self.bound_vertexes[:,1].max()
+        if downsampling:
+            indexes = np.random.choice (len(self.CE),samplenum)
+        else:
+            indexes = range(0,len(self.CE))
+        areas = -np.ones(len(indexes))
+        count = 0
+        for i in indexes:
+            cell = self.CE[i]
+            if (cell == -1).any():
+                count += 1
+                continue
+            poly = self.V[cell]
+            if not self.bounded:
+                if poly[:,0].max()>maxx or poly[:,0].min()<minx \
+                or poly[:,1].max()>maxy or poly[:,1].min()<miny:
+                    count += 1
+                    continue
+            area = self._polyarea(poly)
+            areas[count] = area
+            count += 1
+        return areas
+
+    def cell_perimeters(self,downsampling = False,samplenum = 100):
+        pass
+    
+    ## shape functions
+    def _polyarea(self,xy):
+        '''
+        computing the area of a polygon, which is supplied
+        '''
+        xya = xy[0:,:]
+        xyb = np.vstack((xy[1:,:],xy[:1,:]))
+        area = np.abs(np.sum(np.cross(xya,xyb))/2)
+        return area
+    
+    def _polyFeret_2D(self,xy):
+        # normalization
+        xy = xy-np.mean(xy,axis=0)
+        # rotation angles
+        angles = np.arange(0,np.pi,np.pi/180)
+        lengthx = np.zeros((angles.shape[0]))
+        lengthy = np.zeros((angles.shape[0]))
+        # assemble rotation matrix
+        angles3 = np.reshape(angles,(-1,1,1))
+        Rm1 = np.cos(angles3)
+        Rm2 = np.sin(angles3)
+        Rmrow1 = np.concatenate((Rm1,Rm2),axis=2)
+        Rmrow2 = np.concatenate((-Rm2,Rm1),axis=2)
+        Rm = np.concatenate((Rmrow1,Rmrow2),axis=1)
+        # rotation
+        xy3 = np.repeat(xy[np.newaxis,:,:],angles.shape[0],axis=0)
+        xy3r = np.matmul(xy3, Rm)
+        # find shortest axis
+        lengthx = np.amax(xy3r[:,:,0],axis = -1) - np.amin(xy3r[:,:,0],axis = -1)
+        lengthy = np.amax(xy3r[:,:,1],axis = -1) - np.amin(xy3r[:,:,1],axis = -1)        
+        S = lengthx.min()
+        minI = np.argmin(lengthx)
+        # find long axis and orientation accordingly
+        L = lengthy[minI]
+        LA = np.pi/2 - angles[minI]
+        if LA<0:
+            LA += np.pi
+        return L,S,LA
+
+    def _polyperimeter(self,xy):
+        pass
